@@ -1,0 +1,90 @@
+name: Merge upstream branches
+
+on:
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: "Comma-separated fork branches to sync. Empty syncs the default branch."
+        required: false
+        default: ""
+  schedule:
+    # GitHub cron has no exact biweekly syntax.
+    # Run weekly, then gate to every other Monday from 2026-07-13 UTC.
+    - cron: "17 8 * * 1"
+
+permissions:
+  contents: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Biweekly gate
+        if: github.event_name == 'schedule'
+        run: |
+          set -euo pipefail
+          anchor="$(date -u -d '2026-07-13 00:00:00Z' +%s)"
+          now="$(date -u +%s)"
+          if [ "$now" -lt "$anchor" ]; then
+            echo "Before first biweekly run."
+            exit 0
+          fi
+          weeks="$(( (now - anchor) / 604800 ))"
+          if [ "$(( weeks % 2 ))" -ne 0 ]; then
+            echo "Skipping off-week."
+            exit 0
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_BRANCHES: ${{ github.event.inputs.branches || '' }}
+        run: |
+          set -euo pipefail
+
+          repo_json="$(gh api "repos/${GITHUB_REPOSITORY}")"
+          if [ "$(jq -r '.fork' <<<"${repo_json}")" != "true" ]; then
+            echo "Repository is not a fork; nothing to sync."
+            exit 0
+          fi
+
+          parent="$(jq -r '.parent.full_name // empty' <<<"${repo_json}")"
+          default_branch="$(jq -r '.default_branch' <<<"${repo_json}")"
+          upstream_default="$(gh api "repos/${parent}" --jq '.default_branch')"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "https://github.com/${parent}.git"
+
+          if [ -z "${REQUESTED_BRANCHES}" ]; then
+            branches="${default_branch}"
+          else
+            branches="${REQUESTED_BRANCHES}"
+          fi
+
+          IFS=',' read -ra branch_array <<<"${branches}"
+          for raw_branch in "${branch_array[@]}"; do
+            branch="$(xargs <<<"${raw_branch}")"
+            [ -n "${branch}" ] || continue
+
+            upstream_branch="${branch}"
+            if [ "${branch}" = "${default_branch}" ]; then
+              upstream_branch="${upstream_default}"
+            fi
+
+            if ! git ls-remote --exit-code --heads upstream "${upstream_branch}" >/dev/null; then
+              echo "Skipping ${branch}; upstream branch ${upstream_branch} not found."
+              continue
+            fi
+
+            git fetch origin "${branch}"
+            git fetch upstream "${upstream_branch}"
+            git checkout -B "${branch}" "origin/${branch}"
+            git merge --no-edit "upstream/${upstream_branch}"
+            git push origin "HEAD:${branch}"
+          done
