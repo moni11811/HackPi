@@ -20,26 +20,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Biweekly gate
-        if: github.event_name == 'schedule'
+        id: biweekly
         run: |
           set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" != "schedule" ]; then
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
           anchor="$(date -u -d '2026-07-13 00:00:00Z' +%s)"
           now="$(date -u +%s)"
           if [ "$now" -lt "$anchor" ]; then
             echo "Before first biweekly run."
+            echo "run=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           weeks="$(( (now - anchor) / 604800 ))"
           if [ "$(( weeks % 2 ))" -ne 0 ]; then
             echo "Skipping off-week."
+            echo "run=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
+          echo "run=true" >> "${GITHUB_OUTPUT}"
 
       - uses: actions/checkout@v4
+        if: steps.biweekly.outputs.run == 'true'
         with:
           fetch-depth: 0
 
       - name: Merge upstream
+        if: steps.biweekly.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_BRANCHES: ${{ github.event.inputs.branches || '' }}
